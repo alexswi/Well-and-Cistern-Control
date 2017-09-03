@@ -8,15 +8,17 @@
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <Adafruit_Sensor.h>
+#include <Wire.h>
+#include <Adafruit_INA219.h>
 #include <DHT.h>
 #include <DHT_U.h>
 #include "Passwords.h"
 
-#define SWITCH D6
-#define ONE_WIRE_BUS D2
-#define DHTPIN D3         // Pin which is connected to the DHT sensor.
-#define RELAY1 D5         // Pin which is connected to the DHT sensor.
-#define GET_TEMP_INTERVAL 60000 * 5
+#define SWITCH1 D3
+#define ONE_WIRE_BUS D7
+#define RELAY1 D5 
+#define RELAY2 D6
+#define GET_TEMP_INTERVAL 1000 * 5
 #define SWITCH_INTERVAL 2000
 #define MSG_MAX_LEN 100
 #define DHTTYPE           DHT22     // DHT 22 (AM2302)
@@ -25,15 +27,14 @@
 const char *ssid = WIFI_SSID;
 const char *password = WIFI_PASSWORD;
 const char* mqtt_server = "10.1.1.201";
-const char* hostName = "SwimmingPool";
-const char* mqttTopic = "SwimmingPool";
+const char* hostName = "Well";
+const char* mqttTopic = "Well";
 const char* update_path = "/firmware";
 const char* update_username = UPDATE_USERNAME;
 const char* update_password = UPDATE_PASSWORD;
 
-IPAddress ip(10,1,1, 89);  
+IPAddress ip(10,1,1,50);  
 
-DHT_Unified dht(DHTPIN, DHTTYPE);
 uint32_t delayMS;
 
 
@@ -41,7 +42,7 @@ ESP8266WebServer server ( 80 );
 ESP8266HTTPUpdateServer httpUpdater;
 WiFiClient espClient;
 PubSubClient client(espClient);
-
+Adafruit_INA219 ina219;
 OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
 
@@ -50,6 +51,7 @@ long lastMsg = 0;
 long lastGetTemp = 0;
 long lastSwitchTemp = 0;
 bool relay1State = false;
+bool relay2State = false;
 
 char msg[MSG_MAX_LEN+1];
 int value = 0;
@@ -59,26 +61,29 @@ float relative_humidity_last=-100;
 float waterTemp_last=-100;
 float humidityHistory[HUMIDYHISTORY_LEN];
 
+float current_mA = 0;
+float busvoltage = 0;
+
 const char HTTP_HEAD[] PROGMEM=
 "<!DOCTYPE html><html lang=\"en\" class=\"\">"
 "<head>"
 "<meta charset='utf-8'>"
 "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1,user-scalable=no\"/>"
-"<title>Casa Jardim</title>"
+"<title>Cisterna</title>"
 "<script>"
 "var cn,x,lt;"
 "x=null;"                  // Allow for abortion
 "function la(p){"
-  "var a='?Status=1';"
+  "var a='?Status=0';"
   "if(la.arguments.length==1){"
-    "a='?Relay1='+p;"
+    "a='?Relay='+p;"
     "clearTimeout(lt);"
   "}"
   "if(x!=null){x.abort();}"    // Abort if no response within 2 seconds (happens on restart 1)
   "x=new XMLHttpRequest();"
   "x.onreadystatechange=function(){"
     "if(x.readyState==4&&x.status==200){"
-      "document.getElementById('relayStat').innerHTML=x.responseText;"
+      "document.getElementById('relayStat1').innerHTML=x.responseText;"
     "}"
   "};"
   "x.open('GET','CMD'+a,true);"
@@ -102,9 +107,10 @@ const char HTTP_HEAD[] PROGMEM=
 "</head>"
 "<body>"
 "<div style='text-align:left;display:inline-block;min-width:340px;'>"
-"<div style='text-align:center;'><h3>Casa - Jardim</h3></div>"
-"<div id='l1' name='l1'><table style='width:100%'><tr><td style='width:100%'><div style='text-align:center;font-weight:bold;font-size:62px' id='relayStat' name=''relayStat'>ON</div></td></tr></table></div>"
-"<table style='width:100%'><tbody><tr><td style='width:100%'><button onclick='la(1);'>Toggle</button></td></tr></tbody></table>";
+"<div style='text-align:center;'><h3>Casa - Cisterna</h3></div>"
+"<div id='l1' name='l1'><table style='width:100%'><tr><td style='width:100%'><div style='text-align:center;font-weight:bold;font-size:62px' id='relayStat1' name=''relayStat1'></div></td></tr></table></div>"
+"<table style='width:100%'><tbody><tr><td style='width:100%'><button onclick='la(1);'>Toggle</button></td></tr></tbody></table>"
+"<table style='width:100%'><tbody><tr><td style='width:100%'><button onclick='la(2);'>Toggle</button></td></tr></tbody></table>";
 
 void handleRoot() {
   char tempBuff[400];
@@ -114,12 +120,12 @@ void handleRoot() {
 	int min = sec / 60;
   int hr = min / 60;
   snprintf ( tempBuff, 400,"Uptime: %02d:%02d:%02d",hr, min % 60, sec % 60);
-  String temp = "Water Temp:"+String(waterTemp_last,2);
+  String temp = "Pump Temp:"+String(waterTemp_last,2);
   out += String(tempBuff)+"</p>";
   out += "<p>"+temp+"</p>";
-  temp = "Air Temp:"+String(air_temp_last,2);
+  temp = "Current:"+String(current_mA,2)+"mA";
   out += "<p>"+temp+"</p>";
-  temp = "Air humidity:"+String(relative_humidity_last,0)+"%";
+  temp = "Voltage:"+String(busvoltage,2)+"V";
   out += "<p>"+temp+"</p>";
   out+="<img src=\"/test.svg\" />";
 	server.send ( 200, "text/html", out );
@@ -133,82 +139,6 @@ void humidityPush(){
   }
   Serial.println(" ");
   humidityHistory[HUMIDYHISTORY_LEN-1] = relative_humidity_last;
-}
-
-
-void dthSetup(){
-  dht.begin();
-    // Print temperature sensor details.
-  sensor_t sensor;
-  dht.temperature().getSensor(&sensor);
-  Serial.println("------------------------------------");
-  Serial.println("Temperature");
-  Serial.print  ("Sensor:       "); Serial.println(sensor.name);
-  Serial.print  ("Driver Ver:   "); Serial.println(sensor.version);
-  Serial.print  ("Unique ID:    "); Serial.println(sensor.sensor_id);
-  Serial.print  ("Max Value:    "); Serial.print(sensor.max_value); Serial.println(" *C");
-  Serial.print  ("Min Value:    "); Serial.print(sensor.min_value); Serial.println(" *C");
-  Serial.print  ("Resolution:   "); Serial.print(sensor.resolution); Serial.println(" *C");  
-  Serial.println("------------------------------------");
-  // Print humidity sensor details.
-  dht.humidity().getSensor(&sensor);
-  Serial.println("------------------------------------");
-  Serial.println("Humidity");
-  Serial.print  ("Sensor:       "); Serial.println(sensor.name);
-  Serial.print  ("Driver Ver:   "); Serial.println(sensor.version);
-  Serial.print  ("Unique ID:    "); Serial.println(sensor.sensor_id);
-  Serial.print  ("Max Value:    "); Serial.print(sensor.max_value); Serial.println("%");
-  Serial.print  ("Min Value:    "); Serial.print(sensor.min_value); Serial.println("%");
-  Serial.print  ("Resolution:   "); Serial.print(sensor.resolution); Serial.println("%");  
-  Serial.println("------------------------------------");
-}
-
-void dht_read(){
-  sensors_event_t event;  
-  dht.temperature().getEvent(&event);
-  if (isnan(event.temperature)) {
-    Serial.println("Error reading temperature!");
-    air_temp_last = -100;
-  }
-  else {
-    Serial.print("Temperature: ");
-    Serial.print(event.temperature);
-    Serial.println(" *C");
-    air_temp_last = event.temperature;
-  }
-  // Get humidity event and print its value.
-  dht.humidity().getEvent(&event);
-  if (isnan(event.relative_humidity)) {
-    Serial.println("Error reading humidity!");
-    relative_humidity_last =-100;
-  } else {
-    Serial.print("Humidity: ");
-    Serial.print(event.relative_humidity);
-    Serial.println("%");
-    relative_humidity_last = event.relative_humidity;
-    humidityPush();
-  }  
-}
-
-void drawGraph() {
-  String out = "";
-  
-	char temp[100];
-	out += "<svg xmlns=\"http://www.w3.org/2000/svg\" version=\"1.1\" width=\"400\" height=\"150\">\n";
- 	out += "<rect width=\"400\" height=\"150\" fill=\"rgb(250, 230, 210)\" stroke-width=\"1\" stroke=\"rgb(0, 0, 0)\" />\n";
- 	out += "<g stroke=\"black\">\n";
- 	int y = rand() % 130;
-// 	for (int x = 10; x < 390; x+= 10) {
- 	for (int x = 0; x < HUMIDYHISTORY_LEN-1; x++) {
- 		int y2 = rand() % 130;
- 		sprintf(temp, "<line x1=\"%d\" y1=\"%d\" x2=\"%d\" y2=\"%d\" stroke-width=\"1\" />\n", (x+10)*10, 120 - humidityHistory[x], (x+10)*10 + 20, 140 - humidityHistory[x+1]);
-// 		sprintf(temp, "<line x1=\"%d\" y1=\"%d\" x2=\"%d\" y2=\"%d\" stroke-width=\"1\" />\n", x, 140 - y, x + 10, 140 - y2);
- 		out += temp;
- 		y = y2;
- 	}
-	out += "</g>\n</svg>\n";
-
-	server.send ( 200, "image/svg+xml", out);
 }
 
 
@@ -237,18 +167,35 @@ void relay1Toggle(){
   client.publish(pubTopic.c_str(), relay1State?"ON":"OFF");  
 }
 
+void relay2Toggle(){
+  relay2State = !relay2State;
+  digitalWrite ( RELAY2, relay2State);
+  String pubTopic = "stat/"+String(mqttTopic)+"/POWER";
+  client.publish(pubTopic.c_str(), relay2State?"ON":"OFF");  
+}
+
+void sendRelayStatus(){
+  String messageR = "Relay 1:";
+  messageR+=relay1State?"ON":"OFF";
+  messageR+=" Relay 2:";
+  messageR+=relay2State?"ON":"OFF";
+  server.send (200, "text/plain", messageR);
+}
+
+
 void handleCMD() {
   if(server.method() == HTTP_GET) {
     if(server.args()>0){
-      if(server.argName(0)=="Relay1"){
+      if(server.argName(0)=="Relay" || server.argName(0)=="Status"){
         if(server.arg(0)=="1"){
           relay1Toggle();
-          server.send (200, "text/plain", relay1State?"ON":"OFF");
-          return;
         }
-      } else {
-        server.send (200, "text/plain", relay1State?"ON":"OFF");
-      }
+        if(server.arg(0)=="2"){
+          relay2Toggle();
+        }
+        sendRelayStatus();        
+        return;
+      }  
     }
   } 
 	String message = "File Not Found\n\n";
@@ -289,8 +236,10 @@ void getWaterTemp() {
 }
 
 void setup ( void ) {
-  pinMode (SWITCH,INPUT_PULLUP);
+  pinMode (SWITCH1,INPUT_PULLUP);
+  
   pinMode ( RELAY1, OUTPUT );
+  pinMode ( RELAY2, OUTPUT );
   Serial.begin ( 115200 );
   IPAddress gateway(10, 1,1, 1);  
   IPAddress subnet(255, 255, 255, 0);  
@@ -299,7 +248,7 @@ void setup ( void ) {
 	WiFi.begin ( ssid, password );
 	Serial.println ( "" );
   MDNS.begin(hostName);
- 
+  ina219.begin();
 	// Wait for connection
 	while ( WiFi.status() != WL_CONNECTED ) {
 		delay ( 500 );
@@ -327,19 +276,16 @@ void setup ( void ) {
     Serial.println("OFF");  
   }
 
-  dthSetup();
-  
+ 
   httpUpdater.setup(&server, update_path, update_username, update_password);
 	server.on ( "/", handleRoot);
   server.on ( "/CMD", handleCMD);
-  server.on ( "/test.svg", drawGraph);
 	server.onNotFound ( handleNotFound );
 	server.begin();
   Serial.println ( "HTTP server started" );
   client.setServer(mqtt_server, 1883);
   client.setCallback(callback);  
   getWaterTemp();
-  dht_read();
 }
 
 
@@ -373,7 +319,7 @@ void reconnect() {
 void publishData(){
   long rssi = WiFi.RSSI();
   String tempStr(waterTemp_last,2);
-  tempStr = "{'WaterTemp':'"+tempStr+"','rssi':'"+rssi+"','Relay1':'"+relay1State+"','AirTemp':'"+air_temp_last+"','RelativeHumidity':'"+relative_humidity_last+"'}";
+  tempStr = "{'PumpTemp':'"+tempStr+"','rssi':'"+rssi+"','Relay1':'"+relay1State+"','Relay2':'"+relay2State+"','Current':'"+current_mA+"','Voltage':'"+busvoltage+"'}";
   tempStr.toCharArray(msg, MSG_MAX_LEN);
   Serial.print("Publish message: ");
   Serial.println(msg);
@@ -390,8 +336,11 @@ void loop ( void ) {
   long now = millis();
   if(now-lastGetTemp>GET_TEMP_INTERVAL){
     getWaterTemp();
-    dht_read();
     lastGetTemp=now;
+    current_mA = ina219.getCurrent_mA();
+    busvoltage = ina219.getBusVoltage_V();
+    Serial.print("Current:       "); Serial.print(current_mA); Serial.println(" mA");
+    Serial.print("Bus Voltage:   "); Serial.print(busvoltage); Serial.println(" V");
   }
   if (now - lastMsg > GET_TEMP_INTERVAL) {
     publishData();
@@ -399,8 +348,8 @@ void loop ( void ) {
     ++value;
   } 
   if(now-lastSwitchTemp>SWITCH_INTERVAL){
-    if(digitalRead(SWITCH)==0){
-      Serial.println("SWITCH==0");
+    if(digitalRead(SWITCH1)==0){
+      Serial.println("SWITCH1==0");
       relay1Toggle();
       lastSwitchTemp = now;
     }

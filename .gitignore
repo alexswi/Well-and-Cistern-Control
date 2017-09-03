@@ -30,3 +30,9 @@
 *.exe
 *.out
 *.app
+
+.pioenvs
+.piolibdeps
+.vscode/c_cpp_properties.json
+src/passwords.h
+.vscode/
