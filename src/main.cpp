@@ -14,11 +14,12 @@
 #include <DHT_U.h>
 #include "Passwords.h"
 
-#define SWITCH1 D3
+#define SWITCH1 D4
 #define ONE_WIRE_BUS D7
 #define RELAY1 D5 
 #define RELAY2 D6
-#define GET_TEMP_INTERVAL 1000 * 5
+#define RELAY3 D8
+#define GET_TEMP_INTERVAL 60000
 #define SWITCH_INTERVAL 2000
 #define MSG_MAX_LEN 100
 #define DHTTYPE           DHT22     // DHT 22 (AM2302)
@@ -52,6 +53,7 @@ long lastGetTemp = 0;
 long lastSwitchTemp = 0;
 bool relay1State = false;
 bool relay2State = false;
+bool relay3State = false;
 
 char msg[MSG_MAX_LEN+1];
 int value = 0;
@@ -109,8 +111,9 @@ const char HTTP_HEAD[] PROGMEM=
 "<div style='text-align:left;display:inline-block;min-width:340px;'>"
 "<div style='text-align:center;'><h3>Casa - Cisterna</h3></div>"
 "<div id='l1' name='l1'><table style='width:100%'><tr><td style='width:100%'><div style='text-align:center;font-weight:bold;font-size:62px' id='relayStat1' name=''relayStat1'></div></td></tr></table></div>"
-"<table style='width:100%'><tbody><tr><td style='width:100%'><button onclick='la(1);'>Toggle</button></td></tr></tbody></table>"
-"<table style='width:100%'><tbody><tr><td style='width:100%'><button onclick='la(2);'>Toggle</button></td></tr></tbody></table>";
+"<table style='width:100%'><tbody><tr><td style='width:100%'><button onclick='la(1);'>Toggle 1</button></td></tr></tbody></table>"
+"<table style='width:100%'><tbody><tr><td style='width:100%'><button onclick='la(2);'>Toggle 2</button></td></tr></tbody></table>"
+"<table style='width:100%'><tbody><tr><td style='width:100%'><button onclick='la(3);'>Toggle 3</button></td></tr></tbody></table>";
 
 void handleRoot() {
   char tempBuff[400];
@@ -174,11 +177,21 @@ void relay2Toggle(){
   client.publish(pubTopic.c_str(), relay2State?"ON":"OFF");  
 }
 
+void relay3Toggle(){
+  relay3State = !relay3State;
+  digitalWrite ( RELAY3, relay3State);
+  String pubTopic = "stat/"+String(mqttTopic)+"/POWER";
+  client.publish(pubTopic.c_str(), relay3State?"ON":"OFF");  
+}
+
+
 void sendRelayStatus(){
   String messageR = "Relay 1:";
   messageR+=relay1State?"ON":"OFF";
   messageR+=" Relay 2:";
   messageR+=relay2State?"ON":"OFF";
+  messageR+=" Relay 3:";
+  messageR+=relay3State?"ON":"OFF";
   server.send (200, "text/plain", messageR);
 }
 
@@ -192,6 +205,9 @@ void handleCMD() {
         }
         if(server.arg(0)=="2"){
           relay2Toggle();
+        }
+        if(server.arg(0)=="3"){
+          relay3Toggle();
         }
         sendRelayStatus();        
         return;
@@ -240,6 +256,7 @@ void setup ( void ) {
   
   pinMode ( RELAY1, OUTPUT );
   pinMode ( RELAY2, OUTPUT );
+  pinMode ( RELAY3, OUTPUT );
   Serial.begin ( 115200 );
   IPAddress gateway(10, 1,1, 1);  
   IPAddress subnet(255, 255, 255, 0);  
